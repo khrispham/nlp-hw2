@@ -105,7 +105,7 @@ class Lexicon:
     >>> my_lexicon.find_similar_words("bagpipe")
     """
 
-    def __init__(self) -> None:
+    def __init__(self, vocab: Integerizer[str], embeddings: torch.Tensor) -> None:
         """Load information into coupled word-index mapping and embedding matrix."""
         # FINISH THIS FUNCTION
 
@@ -118,6 +118,12 @@ class Lexicon:
         #
         # Probably make the entire list all at once, then convert to a torch.Tensor.
         # Otherwise, make the torch.Tensor and overwrite its contents row-by-row.
+        
+        vocab_size = len(vocab)       # number of distinct words in the vocab
+        embedding_dim = embeddings.size(1)  # number of dimensions in each embedding
+        assert embeddings.size(0) == vocab_size
+        self.vocab = vocab
+        self.embeddings = embeddings
 
     @classmethod
     def from_file(cls, file: Path) -> Lexicon:
@@ -125,10 +131,24 @@ class Lexicon:
 
         with open(file) as f:
             first_line = next(f)  # Peel off the special first line.
-            for line in f:  # All of the other lines are regular.
-                pass  # `pass` is a placeholder. Replace with real code!
 
-        lexicon = Lexicon()  # Maybe put args here. Maybe follow Builder pattern.
+            # 1st line contains two integers: number of words and embedding dimension.
+            num_words, embedding_dim = map(int, first_line.split())
+            assert num_words > 0 and embedding_dim > 0
+            log.debug(f"Expecting {num_words} words with {embedding_dim}-dimensional embeddings.")
+
+            vocab = Integerizer()  # Start with an empty vocabulary.
+            embeddings = []        # Start with an empty list of embeddings.
+
+            for line in f:  # All of the other lines are regular.
+                word, *vec = line.split()
+                if len(vec) != embedding_dim:
+                    log.warning(f"Skipping line in {file}: {line.strip()}")
+                    continue
+                vocab.add(word)
+                embeddings.append(torch.tensor([float(x) for x in vec]))
+
+        lexicon = Lexicon(vocab, torch.stack(embeddings))
         return lexicon
 
     def find_similar_words(
@@ -151,7 +171,45 @@ class Lexicon:
         # Be sure that you use fast, batched computations
         # instead of looping over the rows. If you use a loop or a comprehension
         # in this function, you've probably made a mistake.
-        return []
+
+        if self.vocab.__contains__(word):
+            word_index = self.vocab.index(word)
+            word_embedding = self.embeddings[word_index]
+
+            if plus is not None and minus is not None:
+                if self.vocab.__contains__(plus) and self.vocab.__contains__(minus):
+                    plus_index = self.vocab.index(plus)
+                    minus_index = self.vocab.index(minus)
+                    plus_embedding = self.embeddings[plus_index]
+                    minus_embedding = self.embeddings[minus_index]
+                    target_embedding = word_embedding + plus_embedding - minus_embedding
+                else:
+                    log.warning(f"Either '{plus}' or '{minus}' not found in vocabulary.")
+                    return []
+            else:
+                target_embedding = word_embedding
+
+            # Normalize the target embedding
+            target_embedding = target_embedding / target_embedding.norm()
+
+            # Normalize all embeddings
+            normalized_embeddings = self.embeddings / self.embeddings.norm(dim=1, keepdim=True)
+
+            # Compute cosine similarities
+            similarities = torch.matmul(normalized_embeddings, target_embedding)
+
+            # Exclude the original word from the results
+            similarities[word_index] = -float('inf')
+
+            # Get the indices of the top 10 most similar words
+            top_indices = torch.topk(similarities, 10).indices.tolist()
+
+            # Convert indices back to words
+            similar_words = [self.vocab[i] for i in top_indices]
+
+            return similar_words
+
+        return []  # word not in vocab
 
 
 def main():
@@ -161,6 +219,9 @@ def main():
     similar_words = lexicon.find_similar_words(
         args.word, plus=args.plus, minus=args.minus
     )
+    print(f"Words most similar to '{args.word}': ", end="")
+    if args.plus is not None and args.minus is not None:
+        print(f" plus '{args.plus}' minus '{args.minus}'", end="")
     print(" ".join(similar_words))  # print all words on one line, separated by spaces
 
 
